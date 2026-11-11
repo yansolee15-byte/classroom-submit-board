@@ -1,0 +1,66 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 실제로 배포하기 전에 아래 UID를 Firebase Authentication의 교사 UID로 교체하세요.
+    function isTeacher() {
+      return request.auth != null && request.auth.uid == 'NCsr7jqB7edwzyhc5Q18NFF9P5K2'
+        && request.auth.token.firebase.sign_in_provider == 'password';
+    }
+    function isGuest() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+    function signedIn() { return request.auth != null; }
+    function itemPath(itemId) { return /databases/$(database)/documents/items/$(itemId); }
+    function studentPath(studentId) { return /databases/$(database)/documents/students/$(studentId); }
+    function validStatus(itemId, status) {
+      return exists(itemPath(itemId))
+        && get(itemPath(itemId)).data.archived == false
+        && (status in ['none', 'done']
+          || (status == 'progress' && get(itemPath(itemId)).data.allowProgress == true));
+    }
+
+    match /students/{studentId} {
+      // 공개 웹앱 방문자는 익명 Firebase 인증을 거치지만, 여전히 누구나 이를 수행할 수 있음.
+      // 학생 이름이 읽히므로 실제 이름을 사용하기 전 개인정보 보호 검토 필수.
+      allow read: if signedIn();
+      allow create, update, delete: if isTeacher();
+    }
+
+    match /items/{itemId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isTeacher();
+    }
+
+    match /submissions/{recordId} {
+      allow read: if signedIn();
+      allow create: if isTeacher() || (
+        isGuest()
+        && request.resource.data.keys().hasAll(['studentId','itemId','status','updatedAt'])
+        && request.resource.data.keys().hasOnly(['studentId','itemId','status','updatedAt'])
+        && request.resource.data.studentId is string
+        && request.resource.data.itemId is string
+        && recordId == request.resource.data.itemId + '__' + request.resource.data.studentId
+        && exists(studentPath(request.resource.data.studentId))
+        && validStatus(request.resource.data.itemId, request.resource.data.status)
+        && request.resource.data.updatedAt == request.time
+      );
+      allow update: if isTeacher() || (
+        isGuest()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt'])
+        && request.resource.data.studentId == resource.data.studentId
+        && request.resource.data.itemId == resource.data.itemId
+        && recordId == resource.data.itemId + '__' + resource.data.studentId
+        && exists(studentPath(resource.data.studentId))
+        && validStatus(resource.data.itemId, request.resource.data.status)
+        && request.resource.data.updatedAt == request.time
+      );
+      allow delete: if isTeacher();
+    }
+
+    // 다른 컬렉션에는 접근 불가
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
