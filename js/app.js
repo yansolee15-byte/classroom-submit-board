@@ -47,7 +47,7 @@ function header() {
     <div class="header-actions">
       ${view === 'teacher' ? `<span class="hint">교사 관리</span><button class="btn small" data-action="sign-out">학생 화면으로</button>`
         : view === 'login' ? `<button class="btn small" data-action="go-student">돌아가기</button>`
-        : ''}
+        : `<button class="btn small" data-action="go-teacher">교사 관리 페이지</button>`}
     </div></div></header>`;
 }
 function demoBanner() {
@@ -105,7 +105,7 @@ function teacherNav() {
   ].map(([key,name]) => `<button class="btn${teacherTab === key ? ' active' : ''}" data-action="teacher-tab" data-id="${key}">${name}</button>`).join('')}</div>`;
 }
 function renderTeacher() {
-  return `<main class="container">${demoBanner()}<h1>교사용 관리 화면</h1><p class="muted">항목과 명단을 관리하고 제출 현황을 확인해.</p>
+  return `<main class="container">${demoBanner()}<h1>교사용 관리 화면</h1>
     ${teacherNav()}${teacherTab === 'overview' ? renderOverview() : teacherTab === 'items' ? renderItems() : renderStudents()}
   </main>`;
 }
@@ -228,7 +228,7 @@ async function handleClick(event) {
   if (action === 'go-teacher') {
     if (store.mode === 'demo') {
       await store.loginTeacher(); view = 'teacher'; render();
-    } else { view = 'login'; render(); }
+    } else { view = state.teacher ? 'teacher' : 'login'; render(); }
   }
   if (action === 'go-student') { view = 'student'; render(); }
   if (action === 'sign-out') { await withBusy(() => store.logoutTeacher(), '학생 화면으로 돌아왔어.'); view = 'student'; render(); }
