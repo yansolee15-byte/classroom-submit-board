@@ -17,7 +17,8 @@ let modal = null; // {itemId, initial, draft, touched:Set}
 let selectedForBulk = new Set();
 let busy = false;
 let toastTimer;
-let errorText = '';
+let returningToStudent = false;
+const loadingScreen = '<div class="loading-screen">우리 반 제출 현황판을 불러옵니다.</div>';
 
 function toast(message, error = false) {
   const existing = document.getElementById('toast');
@@ -29,7 +30,20 @@ function toast(message, error = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.remove(), 4600);
 }
-function showError(message) { errorText = message; toast(message, true); }
+function errorMessage(error) {
+  const code = error?.code;
+  if (['auth/invalid-credential', 'auth/invalid-login-credentials', 'auth/wrong-password', 'auth/user-not-found'].includes(code)) {
+    return '이메일 또는 비밀번호를 확인해 주세요.';
+  }
+  if (code === 'auth/invalid-email') return '이메일 주소 형식을 확인해 주세요.';
+  if (code === 'auth/too-many-requests') return '로그인 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.';
+  if (code === 'auth/network-request-failed' || code === 'unavailable') return '네트워크 연결을 확인한 뒤 다시 시도해 주세요.';
+  if (code === 'permission-denied') return '이 작업을 수행할 권한이 없습니다.';
+  if (code === 'auth/invalid-api-key' || code?.includes('api-key-not-valid')) return 'Firebase API 키 설정을 확인해 주세요.';
+  const message = typeof error === 'string' ? error : error?.message;
+  return message && /[가-힣]/.test(message) ? message : '처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.';
+}
+function showError(error) { toast(errorMessage(error), true); }
 function activeItems() { return orderedItems(state.data.items.filter(item => !item.archived)); }
 function students() { return orderedStudents(state.data.students); }
 function itemById(itemId) { return state.data.items.find(i => i.id === itemId); }
@@ -51,7 +65,7 @@ function header() {
     </div></div></header>`;
 }
 function demoBanner() {
-  return store?.mode === 'demo' ? `<div class="banner"><strong>가상 데이터 체험 모드</strong> · Firebase에 연결되지 않았어. 이 기기 브라우저에만 예시 기록이 저장돼. 실제 학생 정보는 입력하지 마.
+  return store?.mode === 'demo' ? `<div class="banner"><strong>가상 데이터 체험 모드</strong> · Firebase에 연결되어 있지 않습니다. 예시 기록은 이 브라우저에만 저장됩니다. 실제 학생 정보는 입력하지 마세요.
     <button class="btn small" style="margin-left:8px" data-action="reset-demo">예시 초기화</button></div>` : '';
 }
 function renderStudent() {
@@ -59,7 +73,7 @@ function renderStudent() {
   return `<main class="container">${demoBanner()}
     <div class="lead"><div><h1>우리 반 제출 현황</h1></div>
     <div class="count">${students().length}명 · ${items.length}개 항목</div></div>
-    ${!items.length ? '<div class="panel empty">아직 등록된 제출 항목이 없어. 선생님이 항목을 추가하면 여기에 나타나.</div>' : ''}
+    ${!items.length ? '<div class="panel empty">아직 등록된 제출 항목이 없습니다. 선생님이 항목을 추가하면 여기에 표시됩니다.</div>' : ''}
     <div class="cards">${items.map(item => {
       const counts = itemCounts(item.id);
       return `<button class="card click-card" data-action="open-modal" data-id="${h(item.id)}" aria-label="${h(item.title)} 제출 상태 체크하기">
@@ -92,7 +106,7 @@ function renderModal() {
 function renderLogin() {
   return `<main class="container">${demoBanner()}
     <div class="panel" style="max-width:450px;margin:30px auto"><h1>선생님 로그인</h1>
-      <p class="muted">등록된 교사 계정으로 로그인해 학급을 관리해.</p>
+      <p class="muted">등록된 교사 계정으로 로그인해 주세요.</p>
       <form data-form="login" class="field" style="gap:14px;margin-top:20px">
         <div class="field"><label for="teacher-email">이메일</label><input type="email" id="teacher-email" name="email" required autocomplete="username" /></div>
         <div class="field"><label for="teacher-password">비밀번호</label><input type="password" id="teacher-password" name="password" required autocomplete="current-password" /></div>
@@ -127,14 +141,14 @@ function renderOverview() {
     ${teacherMode === 'item' ? `
       <div class="field"><label for="teacher-item-selector">제출 항목 선택</label>
       <select id="teacher-item-selector" data-select="item"><option value="">항목 선택</option>${allItems.map(item => `<option value="${h(item.id)}" ${item.id === selectedItem?.id ? 'selected' : ''}>${h(item.title)}</option>`).join('')}</select></div>
-      ${selectedItem ? renderTeacherItemTable(selectedItem) : '<p class="empty">등록된 항목이 없어.</p>'}
+      ${selectedItem ? renderTeacherItemTable(selectedItem) : '<p class="empty">등록된 항목이 없습니다.</p>'}
     ` : `
       <div class="field"><label for="teacher-student-selector">학생 선택</label>
       <select id="teacher-student-selector" data-select="student"><option value="">학생 선택</option>${students().map(s => `<option value="${h(s.id)}" ${s.id === chosenStudent?.id ? 'selected' : ''}>${h(s.number)}번 ${h(s.name)}</option>`).join('')}</select></div>
       ${chosenStudent ? `<div class="table-wrap"><table><thead><tr><th>제출 항목</th><th>제출 상태</th><th>변경</th></tr></thead><tbody>${allItems.map(item => {
         const status = getStatus(state.data, item.id, chosenStudent.id);
         return `<tr><td>${h(item.title)}</td><td>${statusIcon(status)} ${statusLabel(status)}</td><td><button class="teacher-row-btn${choiceClass(status)}" data-action="teacher-status" data-item="${h(item.id)}" data-student="${h(chosenStudent.id)}">상태 변경 ↻</button></td></tr>`;
-      }).join('')}</tbody></table></div>` : '<p class="empty">등록된 학생이 없어.</p>'}
+      }).join('')}</tbody></table></div>` : '<p class="empty">등록된 학생이 없습니다.</p>'}
     `}</section>`;
 }
 function renderTeacherItemTable(item) {
@@ -176,7 +190,7 @@ function renderStudents() {
       <div class="row"><button class="btn primary" type="submit" ${busy ? 'disabled' : ''}>${student ? '수정 저장' : '학생 추가'}</button>
         ${student ? '<button type="button" class="btn" data-action="cancel-edit-student">수정 취소</button>' : ''}</div>
     </form></section>
-    <section class="panel"><h2>학생 일괄 등록</h2><p class="help">한 줄에 <strong>번호,이름</strong>을 입력해. 예: 1,김하늘 (중복 출석번호는 등록되지 않아.)</p>
+    <section class="panel"><h2>학생 일괄 등록</h2><p class="help">한 줄에 <strong>번호,이름</strong> 형식으로 입력해 주세요. 예: 1,김하늘. 중복된 출석번호는 등록할 수 없습니다.</p>
       <form data-form="bulk-students"><div class="field"><label for="bulk-list">여러 학생 추가</label><textarea id="bulk-list" name="students" rows="4" placeholder="1,김하늘&#10;2,박서준" required></textarea></div>
       <button class="btn" type="submit" style="margin-top:10px">명단 일괄 등록</button></form></section>
     <section class="panel"><h2>등록 학생 ${students().length}명</h2><div class="table-wrap"><table><thead><tr><th>번호</th><th>이름</th><th>관리</th></tr></thead><tbody>
@@ -186,13 +200,14 @@ function renderStudents() {
     </tbody></table></div></section>`;
 }
 function render() {
+  if (returningToStudent) { $app.innerHTML = header() + loadingScreen; return; }
   $app.innerHTML = header() + (view === 'teacher' && state.teacher ? renderTeacher() : view === 'login' ? renderLogin() : renderStudent()) + renderModal();
 }
 async function withBusy(operation, successMessage) {
   if (busy) return;
   busy = true; render();
   try { await operation(); if (successMessage) toast(successMessage); }
-  catch (e) { showError(e.message || '처리 중 오류가 발생했어.'); }
+  catch (e) { showError(e); }
   finally { busy = false; render(); }
 }
 function openModal(itemId) {
@@ -210,13 +225,13 @@ async function saveModal() {
     // 팝업이 열려 있는 동안 다른 태블릿이 같은 학생을 수정했다면 덮어쓰지 않는다.
     const latest = getStatus(state.data, draft.itemId, studentId);
     if (latest !== draft.initial[studentId]) {
-      showError('다른 기기에서 같은 학생의 상태가 바뀌었어. 팝업을 다시 열어 확인해 줘.');
+      showError('다른 기기에서 같은 학생의 상태가 변경되었습니다. 선택 창을 다시 열어 확인해 주세요.');
       return;
     }
     changes[studentId] = draft.draft[studentId];
   }
   if (Object.keys(changes).length === 0) { modal = null; render(); return; }
-  await withBusy(async () => { await store.saveSubmissions(draft.itemId, changes, draft.initial); modal = null; }, '변경 사항을 저장했어.');
+  await withBusy(async () => { await store.saveSubmissions(draft.itemId, changes, draft.initial); modal = null; }, '변경 사항을 저장했습니다.');
 }
 function uniqueNumber(number, exceptId = null) {
   return state.data.students.some(s => Number(s.number) === number && s.id !== exceptId);
@@ -231,7 +246,18 @@ async function handleClick(event) {
     } else { view = state.teacher ? 'teacher' : 'login'; render(); }
   }
   if (action === 'go-student') { view = 'student'; render(); }
-  if (action === 'sign-out') { await withBusy(() => store.logoutTeacher(), '학생 화면으로 돌아왔어.'); view = 'student'; render(); }
+  if (action === 'sign-out') {
+    returningToStudent = true;
+    modal = null;
+    await withBusy(async () => {
+      try {
+        await store.logoutTeacher();
+        view = 'student';
+      } finally {
+        returningToStudent = false;
+      }
+    }, '학생 화면으로 이동했습니다.');
+  }
   if (action === 'open-modal') openModal(targetId);
   if (action === 'close-modal') { modal = null; render(); }
   if (action === 'toggle-student' && modal) {
@@ -240,32 +266,32 @@ async function handleClick(event) {
     modal.touched.add(targetId); render();
   }
   if (action === 'save-modal') await saveModal();
-  if (action === 'reset-demo' && store.mode === 'demo' && confirm('가상 데이터를 처음 상태로 돌릴까?')) {
+  if (action === 'reset-demo' && store.mode === 'demo' && confirm('가상 데이터를 초기화하시겠습니까?')) {
     store.resetDemo(); view = 'student'; modal = null; render();
   }
   if (action === 'teacher-tab') { teacherTab = targetId; editingItemId = null; editingStudentId = null; selectedForBulk.clear(); render(); }
   if (action === 'teacher-mode') { teacherMode = targetId; selectedForBulk.clear(); render(); }
   if (action === 'teacher-status') {
     const item = itemById(button.dataset.item), studentId = button.dataset.student;
-    await withBusy(() => store.saveSubmissions(item.id, {[studentId]: nextStatus(getStatus(state.data, item.id, studentId), item.allowProgress)}), '제출 상태를 수정했어.');
+    await withBusy(() => store.saveSubmissions(item.id, {[studentId]: nextStatus(getStatus(state.data, item.id, studentId), item.allowProgress)}), '제출 상태를 수정했습니다.');
   }
   if (action === 'bulk-done' || action === 'bulk-none') {
     const itemId = activeItemId && activeItems().some(i=>i.id===activeItemId) ? activeItemId : activeItems()[0]?.id;
     if (!itemId || selectedForBulk.size===0) return;
     const updates = Object.fromEntries([...selectedForBulk].map(id => [id, action === 'bulk-done' ? DONE : NONE]));
-    await withBusy(() => store.saveSubmissions(itemId, updates), '선택한 학생의 상태를 변경했어.');
+    await withBusy(() => store.saveSubmissions(itemId, updates), '선택한 학생의 상태를 변경했습니다.');
     selectedForBulk.clear(); render();
   }
   if (action === 'edit-item') { editingItemId = targetId; render(); window.scrollTo({top:0,behavior:'smooth'}); }
   if (action === 'cancel-edit-item') { editingItemId = null; render(); }
   if (action === 'archive-item') {
     const item = itemById(targetId);
-    await withBusy(() => store.updateItem(targetId, {archived: !item.archived}), item.archived ? '항목을 복원했어.' : '항목을 보관했어.');
+    await withBusy(() => store.updateItem(targetId, {archived: !item.archived}), item.archived ? '항목을 복원했습니다.' : '항목을 보관했습니다.');
   }
   if (action === 'delete-item') {
     const item = itemById(targetId);
-    if (confirm(`'${item.title}' 항목과 관련 제출 기록을 모두 삭제할까? 되돌릴 수 없어.`)) {
-      await withBusy(() => store.deleteItem(targetId), '항목을 삭제했어.');
+    if (confirm(`'${item.title}' 항목과 관련 제출 기록을 모두 삭제하시겠습니까? 삭제한 기록은 복구할 수 없습니다.`)) {
+      await withBusy(() => store.deleteItem(targetId), '항목을 삭제했습니다.');
       if (editingItemId === targetId) editingItemId = null;
     }
   }
@@ -273,8 +299,8 @@ async function handleClick(event) {
   if (action === 'cancel-edit-student') { editingStudentId = null; render(); }
   if (action === 'delete-student') {
     const student = state.data.students.find(s => s.id === targetId);
-    if (confirm(`${student.number}번 ${student.name} 학생과 모든 제출 기록을 삭제할까? 되돌릴 수 없어.`)) {
-      await withBusy(() => store.deleteStudent(targetId), '학생을 삭제했어.');
+    if (confirm(`${student.number}번 ${student.name} 학생과 해당 학생의 모든 제출 기록을 삭제하시겠습니까? 삭제한 기록은 복구할 수 없습니다.`)) {
+      await withBusy(() => store.deleteStudent(targetId), '학생을 삭제했습니다.');
       if (editingStudentId === targetId) editingStudentId = null;
     }
   }
@@ -285,44 +311,44 @@ async function handleSubmit(event) {
   event.preventDefault();
   const values = new FormData(form);
   if (form.dataset.form === 'login') {
-    await withBusy(async () => {await store.loginTeacher(values.get('email'), values.get('password')); view = 'teacher';}, '선생님 계정으로 로그인했어.');
+    await withBusy(async () => {await store.loginTeacher(values.get('email'), values.get('password')); view = 'teacher';}, '교사 계정으로 로그인했습니다.');
   }
   if (form.dataset.form === 'student') {
     const number = Number(values.get('number')), name = String(values.get('name')).trim();
-    if (!Number.isInteger(number) || number <= 0 || !name) return showError('출석번호와 이름을 올바르게 입력해 줘.');
-    if (uniqueNumber(number, editingStudentId)) return showError('이미 등록된 출석번호야.');
+    if (!Number.isInteger(number) || number <= 0 || !name) return showError('출석번호와 이름을 올바르게 입력해 주세요.');
+    if (uniqueNumber(number, editingStudentId)) return showError('이미 등록된 출석번호입니다.');
     await withBusy(async () => {
       if (editingStudentId) await store.updateStudent(editingStudentId, {number,name});
       else await store.addStudent({number,name});
       editingStudentId = null;
-    }, '학생 정보를 저장했어.');
+    }, '학생 정보를 저장했습니다.');
   }
   if (form.dataset.form === 'bulk-students') {
     const lines = String(values.get('students') ?? '').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
     const entries = [];
     for (const line of lines) {
       const match = line.match(/^(\d+)\s*[,\t]\s*(.+)$/);
-      if (!match) return showError(`'${line}' 줄은 '번호,이름' 형식으로 작성해 줘.`);
+      if (!match) return showError(`'${line}' 줄은 '번호,이름' 형식으로 입력해 주세요.`);
       const number = Number(match[1]), name = match[2].trim();
-      if (number <= 0 || !name || uniqueNumber(number) || entries.some(s => s.number === number)) return showError(`중복되거나 잘못된 번호가 있어: ${line}`);
+      if (number <= 0 || !name || uniqueNumber(number) || entries.some(s => s.number === number)) return showError(`출석번호가 중복되었거나 형식이 올바르지 않습니다. (${line})`);
       entries.push({number,name});
     }
-    await withBusy(() => store.addStudents(entries), `${entries.length}명을 추가했어.`);
+    await withBusy(() => store.addStudents(entries), `${entries.length}명을 추가했습니다.`);
   }
   if (form.dataset.form === 'item') {
     const title = String(values.get('title')).trim();
     const dueDate = String(values.get('dueDate') || '');
     const allowProgress = values.get('allowProgress') === 'on';
-    if (!title) return showError('제출 항목명을 입력해 줘.');
+    if (!title) return showError('제출 항목명을 입력해 주세요.');
     const oldItem = itemById(editingItemId);
     if (oldItem?.allowProgress && !allowProgress && state.data.submissions.some(s => s.itemId === oldItem.id && s.status === PROGRESS)) {
-      if (!confirm('진행 중 허용을 끄면 기존 진행 중 상태는 모두 미완료로 돌아가. 계속할까?')) return;
+      if (!confirm('진행 중 허용을 끄면 기존 진행 중 상태가 모두 미완료로 변경됩니다. 계속하시겠습니까?')) return;
     }
     await withBusy(async () => {
       if (editingItemId) await store.updateItem(editingItemId, {title,dueDate,allowProgress});
       else await store.addItem({title,dueDate,allowProgress});
       editingItemId = null;
-    }, '제출 항목을 저장했어.');
+    }, '제출 항목을 저장했습니다.');
   }
 }
 function handleChange(event) {
@@ -339,8 +365,8 @@ function handleChange(event) {
     render();
   }
 }
-$app.addEventListener('click', event => { handleClick(event).catch(e=>showError(e.message)); });
-$app.addEventListener('submit', event => { handleSubmit(event).catch(e=>showError(e.message)); });
+$app.addEventListener('click', event => { handleClick(event).catch(showError); });
+$app.addEventListener('submit', event => { handleSubmit(event).catch(showError); });
 $app.addEventListener('change', handleChange);
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && modal && !busy) { modal = null; render(); }
@@ -359,5 +385,5 @@ try {
   }
   render();
 } catch (error) {
-  $app.innerHTML = `<main class="container"><div class="panel"><h1>연결할 수 없어</h1><p class="muted">Firebase 설정이나 네트워크를 확인해 줘.</p><p>${h(error.message)}</p></div></main>`;
+  $app.innerHTML = `<main class="container"><div class="panel"><h1>연결할 수 없습니다</h1><p class="muted">네트워크 또는 Firebase 설정을 확인한 뒤 다시 시도해 주세요.</p><p>${h(errorMessage(error))}</p></div></main>`;
 }

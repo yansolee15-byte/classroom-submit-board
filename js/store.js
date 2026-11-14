@@ -34,7 +34,7 @@ export async function createStore(onChange, onError) {
   if (configStatus.mode === 'demo') return createDemoStore(onChange);
   if (configStatus.mode === 'invalid') throw new Error(configStatus.message);
   try { return await createFirebaseStore(onChange, onError); }
-  catch (error) { onError(`Firebase 연결 실패: ${error.message}`); throw error; }
+  catch (error) { throw new Error('Firebase에 연결할 수 없습니다. 네트워크 또는 Firebase 설정을 확인해 주세요.', {cause: error}); }
 }
 
 function createDemoStore(onChange) {
@@ -104,69 +104,160 @@ async function createFirebaseStore(onChange, onError) {
   const auth = authSdk.getAuth(app);
   const db = dbSdk.getFirestore(app);
   let teacher = false;
-  let unsubscribe = [];
-  const data = { students: [], items: [], submissions: [] };
-  const readyParts = new Set();
-  let authInit;
-  const authReady = new Promise(resolve => {authInit = resolve;});
+  let switchingAuth = false;
+  let guestPending = null;
+  let watcher = null;
+  const collections = ['students', 'items', 'submissions'];
+  const labels = { students: '학생 명단', items: '제출 항목', submissions: '제출 기록' };
+  const emptyData = () => ({ students: [], items: [], submissions: [] });
+  let data = emptyData();
 
-  function publish() {
-    if (readyParts.size === 3) onChange({data: clone(data), teacher});
-  }
-  function subscribe() {
-    unsubscribe.forEach(fn => fn());
-    unsubscribe = [];
-    readyParts.clear();
-    const collections = ['students', 'items', 'submissions'];
-    for (const name of collections) {
-      const stop = dbSdk.onSnapshot(dbSdk.collection(db, name), snapshot => {
-        data[name] = snapshot.docs.map(d => ({...d.data(), id: d.id}));
-        readyParts.add(name);
-        publish();
-      }, error => onError(`${name} 데이터 접근 오류: ${error.message}`));
-      unsubscribe.push(stop);
-    }
+  function stopWatching() {
+    const previous = watcher;
+    watcher = null;
+    previous?.stop();
   }
 
-  authSdk.onAuthStateChanged(auth, async user => {
-    try {
-      if (!user) {
-        await authSdk.signInAnonymously(auth);
-        return;
+  function watch(user) {
+    if (watcher?.uid === user.uid) return watcher.ready;
+    stopWatching();
+    const incoming = emptyData();
+    const readyParts = new Set();
+    const unsubscribe = [];
+    let resolveReady, rejectReady;
+    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    let initial = true;
+    const current = { uid: user.uid, ready, stop };
+    watcher = current;
+    const isCurrent = () => watcher === current && auth.currentUser?.uid === user.uid;
+    const timer = setTimeout(() => fail(new Error('데이터를 불러오지 못했습니다. 네트워크 연결을 확인해 주세요.')), 15000);
+
+    function stop() {
+      clearTimeout(timer);
+      for (const cancel of unsubscribe) cancel();
+      if (initial) {
+        initial = false;
+        resolveReady(false);
       }
-      teacher = Boolean(teacherUid) && user.uid === teacherUid && !user.isAnonymous;
-      subscribe();
-      authInit();
-    } catch (error) { onError(`인증 오류: ${error.message}`); authInit(); }
-  }, error => { onError(`인증 오류: ${error.message}`); authInit(); });
+    }
+
+    function fail(error) {
+      if (!isCurrent()) return;
+      if (initial) {
+        initial = false;
+        rejectReady(error);
+      } else {
+        onError(error);
+      }
+      stopWatching();
+    }
+
+    for (const name of collections) {
+      const cancel = dbSdk.onSnapshot(dbSdk.collection(db, name), {includeMetadataChanges: true}, snapshot => {
+        if (!isCurrent() || (initial && snapshot.metadata.fromCache)) return;
+        incoming[name] = snapshot.docs.map(doc => ({...doc.data(), id: doc.id}));
+        readyParts.add(name);
+        if (readyParts.size !== collections.length) return;
+        data = incoming;
+        if (initial) {
+          initial = false;
+          clearTimeout(timer);
+          resolveReady(true);
+        }
+        onChange({data: clone(data), teacher});
+      }, error => {
+        const message = error.code === 'permission-denied'
+          ? `${labels[name]}에 접근할 권한이 없습니다.`
+          : `${labels[name]}을(를) 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.`;
+        fail(new Error(message));
+      });
+      unsubscribe.push(cancel);
+    }
+    return ready;
+  }
+
+  function isTeacher(user) {
+    return Boolean(teacherUid) && user?.uid === teacherUid && !user.isAnonymous;
+  }
+
+  async function signInGuest() {
+    if (auth.currentUser?.isAnonymous) return auth.currentUser;
+    if (!guestPending) {
+      guestPending = authSdk.signInAnonymously(auth).then(({user}) => user)
+        .finally(() => { guestPending = null; });
+    }
+    return guestPending;
+  }
+
+  // 이전 계정으로 열린 구독은 새 인증 상태가 적용되기 전에 먼저 닫습니다.
+  authSdk.beforeAuthStateChanged(auth, nextUser => {
+    if (auth.currentUser?.uid !== nextUser?.uid) stopWatching();
+  });
+
+  function followAuth(user) {
+    if (switchingAuth || auth.currentUser?.uid !== user?.uid) return;
+    teacher = isTeacher(user);
+    if (!user) {
+      stopWatching();
+      data = emptyData();
+      onChange({data: clone(data), teacher: false});
+      signInGuest().catch(onError);
+      return;
+    }
+    watch(user).catch(onError);
+  }
 
   const ref = (name, docId) => dbSdk.doc(db, name, docId);
   const stamp = () => dbSdk.serverTimestamp();
-  function teacherOnly() { if (!teacher) throw new Error('교사 인증이 필요해.'); }
+  function teacherOnly() {
+    if (!teacher || !isTeacher(auth.currentUser)) throw new Error('교사 인증이 필요합니다.');
+  }
   function batch() { return dbSdk.writeBatch(db); }
 
   return {
     mode: 'firebase',
-    async start() { await authReady; },
+    async start() {
+      await auth.authStateReady();
+      authSdk.onAuthStateChanged(auth, followAuth, onError);
+    },
     async loginTeacher(email, password) {
-      if (!teacherUid) throw new Error('js/config.js에 교사 UID를 먼저 설정해야 해.');
-      const result = await authSdk.signInWithEmailAndPassword(auth, email, password);
-      if (result.user.uid !== teacherUid) {
-        await authSdk.signOut(auth);
-        throw new Error('등록된 교사 계정이 아니야.');
+      if (!teacherUid) throw new Error('js/config.js에 교사 UID를 먼저 입력해 주세요.');
+      switchingAuth = true;
+      try {
+        if (guestPending) await guestPending.catch(() => {});
+        const {user} = await authSdk.signInWithEmailAndPassword(auth, email, password);
+        if (!isTeacher(user)) {
+          await authSdk.signOut(auth);
+          throw new Error('등록된 교사 계정이 아닙니다.');
+        }
+        teacher = true;
+        if (!await watch(user)) throw new Error('로그인 상태가 변경되었습니다. 다시 로그인해 주세요.');
+      } finally {
+        switchingAuth = false;
+        if (!watcher && !teacher) followAuth(auth.currentUser);
       }
-      teacher = true;
-      subscribe();
-      publish();
     },
     async logoutTeacher() {
-      await authSdk.signOut(auth); // auth observer가 익명 계정으로 자동 전환
-      teacher = false;
+      switchingAuth = true;
+      stopWatching();
+      try {
+        await authSdk.signOut(auth);
+        teacher = false;
+        data = emptyData();
+        onChange({data: clone(data), teacher: false});
+        const user = await signInGuest();
+        if (!await watch(user)) throw new Error('학생 화면을 불러오지 못했습니다. 다시 시도해 주세요.');
+      } finally {
+        switchingAuth = false;
+        teacher = isTeacher(auth.currentUser);
+        // 로그아웃 자체가 실패한 경우에만 기존 교사 화면의 구독을 복구합니다.
+        if (teacher && !watcher) followAuth(auth.currentUser);
+      }
     },
     async saveSubmissions(itemId, changes, expected = null) {
       const entries = Object.entries(changes);
       if (entries.length === 0) return;
-      if (entries.length > 400) throw new Error('한 번에 수정할 수 있는 기록이 너무 많아.');
+      if (entries.length > 400) throw new Error('한 번에 수정할 수 있는 기록은 400개까지입니다.');
       // 학생 팝업은 스냅샷을 받은 뒤 같은 학생의 기록이 외부에서 바뀌었는지도 검사한다.
       // 화면에 보이는 데이터만 검사하면 읽기와 쓰기 사이의 경쟁 상태가 생길 수 있다.
       if (expected && !teacher) {
@@ -178,7 +269,7 @@ async function createFirebaseStore(onChange, onError) {
           entries.forEach(([studentId, status], index) => {
             const current = snapshots[index].exists() ? snapshots[index].data().status : NONE;
             if (current !== (expected[studentId] ?? NONE)) {
-              throw new Error('다른 기기에서 같은 학생의 상태가 먼저 변경되었어. 팝업을 닫았다가 다시 열어 확인해 줘.');
+              throw new Error('다른 기기에서 같은 학생의 상태가 먼저 변경되었습니다. 선택 창을 닫았다가 다시 열어 주세요.');
             }
           });
           entries.forEach(([studentId, status], index) => {
@@ -201,7 +292,7 @@ async function createFirebaseStore(onChange, onError) {
     },
     async addStudents(students) {
       teacherOnly();
-      if (students.length > 450) throw new Error('한 번에 등록할 학생은 450명 이하로 해 줘.');
+      if (students.length > 450) throw new Error('한 번에 450명까지 등록할 수 있습니다.');
       const w = batch();
       for (const student of students) w.set(dbSdk.doc(dbSdk.collection(db, 'students')), {...student, createdAt: stamp()});
       await w.commit();
